@@ -1,6 +1,9 @@
 ﻿using DS4AudioStreamer;
 using DS4AudioStreamer.Sound;
 
+// Allow sleep time durations less than 16 ms
+//DS4Windows.NativeMethods.timeBeginPeriod(1);
+
 var hidDevices = DeviceEnumerator.FindDevices();
 
 var usedDevice = hidDevices.FirstOrDefault();
@@ -26,3 +29,6 @@ while (usedDevice.IsConnected)
 {
     Thread.Sleep(1000);
 }
+
+// Allow sleep time durations less than 16 ms
+//DS4Windows.NativeMethods.timeEndPeriod(1);

@@ -422,5 +422,10 @@ namespace DS4Windows
         [DllImport("hid.dll")]
         static internal extern bool HidD_GetSerialNumberString(IntPtr HidDeviceObject, byte[] Buffer, uint BufferLength);
 #endif
+
+        [DllImport("winmm.dll")]
+        internal static extern uint timeBeginPeriod(uint period);
+        [DllImport("winmm.dll")]
+        internal static extern uint timeEndPeriod(uint period);
     }
 }

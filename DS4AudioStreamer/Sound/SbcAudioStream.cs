@@ -31,6 +31,10 @@ namespace DS4AudioStreamer.Sound
 
         public int CurrentFrameCount => (_sbcAudioData.CurrentLength / FrameSize);
 
+        public ReaderWriterLockSlim testLocker = new ReaderWriterLockSlim();
+
+        public ManualResetEventSlim audioDataReadyEvent = new ManualResetEventSlim();
+
         public SbcAudioStream()
         {
             // Encoder
@@ -39,7 +43,7 @@ namespace DS4AudioStreamer.Sound
                 SubBandCount.Sb8,
                 48,
                 ChannelMode.JointStereo,
-                AllocationMode.Snr,
+                AllocationMode.Loudness,
                 BlockCount.Blk16
             );
             
@@ -47,11 +51,11 @@ namespace DS4AudioStreamer.Sound
             _sbcPostBuffer = new byte[_encoder.FrameSize];
             
             // Capture Device
-            _captureDevice = new MyLoopbackCapture(0);
+            _captureDevice = new MyLoopbackCapture(30); // Need a small buffer
             _captureDevice.DataAvailable += CaptureDeviceOnDataAvailable;
 
             // Buffers
-            var bufferSize = _captureDevice.WaveFormat.ConvertLatencyToByteSize(32);
+            var bufferSize = _captureDevice.WaveFormat.ConvertLatencyToByteSize(64);
             _audioData = new CircularBuffer<byte>(bufferSize);
             _sbcAudioData = new CircularBuffer<byte>(bufferSize);
             _resampledAudioBuffer = new byte[bufferSize];
@@ -85,54 +89,61 @@ namespace DS4AudioStreamer.Sound
         private unsafe void CaptureDeviceOnDataAvailable(object? sender, WaveInEventArgs e)
         {
             try
-            {   
-                var sampleCount = e.BytesRecorded / 4;
-                
-                var reformatedSampleCount = sampleCount;
-                
-                fixed (byte* srcPtr = e.Buffer) 
-                fixed (byte* resamplePtr = _resampledAudioBuffer)
-                fixed (byte* reformatPtr = _reformattedAudioBuffer)    
+            {
+                unchecked
                 {
-                    if (STREAM_SAMPLE_RATE != _captureDevice.WaveFormat.SampleRate)
+                    var sampleCount = e.BytesRecorded / 4;
+
+                    var reformatedSampleCount = sampleCount;
+
+                    fixed (byte* srcPtr = e.Buffer)
+                    fixed (byte* resamplePtr = _resampledAudioBuffer)
+                    fixed (byte* reformatPtr = _reformattedAudioBuffer)
                     {
-                        var frames = sampleCount / CHANNEL_COUNT;
-                        var convert = new SRC_DATA
+                        if (STREAM_SAMPLE_RATE != _captureDevice.WaveFormat.SampleRate)
                         {
-                            data_in = (float*)srcPtr,
-                            data_out = (float*)resamplePtr,
-                            input_frames = frames,
-                            output_frames = frames,
-                            src_ratio = _resampleRatio
-                        };
-                    
-                        var res = src_process(_resamplerState, ref convert);
-                    
-                        if (res != 0) throw new Exception(src_strerror(res));
-                    
-                        if (convert.input_frames != convert.input_frames_used) Console.WriteLine("Not all frames used (?)");
-                
-                        reformatedSampleCount = convert.output_frames_gen * CHANNEL_COUNT;
-                        src_float_to_short_array((float*)resamplePtr, (short*)reformatPtr, reformatedSampleCount);
+                            var frames = sampleCount / CHANNEL_COUNT;
+                            var convert = new SRC_DATA
+                            {
+                                data_in = (float*)srcPtr,
+                                data_out = (float*)resamplePtr,
+                                input_frames = frames,
+                                output_frames = frames,
+                                src_ratio = _resampleRatio
+                            };
+
+                            var res = src_process(_resamplerState, ref convert);
+
+                            if (res != 0) throw new Exception(src_strerror(res));
+
+                            if (convert.input_frames != convert.input_frames_used) Console.WriteLine("Not all frames used (?)");
+
+                            reformatedSampleCount = convert.output_frames_gen * CHANNEL_COUNT;
+                            src_float_to_short_array((float*)resamplePtr, (short*)reformatPtr, reformatedSampleCount);
+                        }
+                        else
+                        {
+                            src_float_to_short_array((float*)srcPtr, (short*)reformatPtr, sampleCount);
+                        }
                     }
-                    else
+
+                    _audioData.CopyFrom(_reformattedAudioBuffer, reformatedSampleCount * 2);
+
+                    testLocker.EnterWriteLock();
+                    while (_audioData.CurrentLength >= (int)_encoder.CodeSize)
                     {
-                        src_float_to_short_array((float*)srcPtr, (short*)reformatPtr, sampleCount);
+                        _audioData.CopyTo(_sbcPreBuffer, (int)_encoder.CodeSize);
+
+                        _encoder.Encode(_sbcPreBuffer, _sbcPostBuffer, _encoder.CodeSize, out var length);
+
+                        if (length == 0)
+                            Console.WriteLine("Not encoded");
+                        else
+                            _sbcAudioData.CopyFrom(_sbcPostBuffer, (int)length);
                     }
-                }
-                
-                _audioData.CopyFrom(_reformattedAudioBuffer, reformatedSampleCount * 2);
 
-                while (_audioData.CurrentLength >= (int) _encoder.CodeSize)
-                {
-                    _audioData.CopyTo(_sbcPreBuffer, (int) _encoder.CodeSize);
-
-                    _encoder.Encode(_sbcPreBuffer, _sbcPostBuffer, _encoder.CodeSize, out var length);
-                    
-                    if (length == 0)
-                        Console.WriteLine("Not encoded");
-                    else
-                        _sbcAudioData.CopyFrom(_sbcPostBuffer, (int) length);                        
+                    testLocker.ExitWriteLock();
+                    audioDataReadyEvent.Set();
                 }
             }
             catch (Exception exception)
